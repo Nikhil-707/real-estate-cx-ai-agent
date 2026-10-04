@@ -431,20 +431,60 @@ def lead_qualification_check_node(state: ConversationState) -> ConversationState
 
 
 # ---------------------------------------------------------------------------
-# Escalation / Notification Webhook (hardcoded target device, per spec)
+# Escalation / Notification via Telegram Bot
 # ---------------------------------------------------------------------------
+
+
+def _escape_markdown_v2(text: str) -> str:
+    """Escape Telegram MarkdownV2 reserved characters with a preceding backslash."""
+    if text is None:
+        return ""
+    text = str(text)
+    reserved = r"_*[]()~`>#+-=|{}.!"
+    return re.sub(f"([{re.escape(reserved)}])", r"\\\1", text)
+
+
 def _post_notification(payload: dict) -> None:
     """
-    Fire-and-forget-ish HTTP POST to the configured notification webhook,
-    simulating a WhatsApp/SMS push to the developer's verification device.
-    Failures are swallowed (logged to stdout only) so a notification outage
-    never breaks the live customer conversation.
+    Sends a formatted alert to the admin Telegram chat. Failures are caught
+    and logged only — a Telegram outage must never interrupt or break the
+    live customer conversation / graph execution.
     """
+    alert_type = payload.get("alert_type")
+
+    if alert_type == "HUMAN_ESCALATION":
+        text = (
+            f"⚠️ *AI CIRCUIT BREAKER DETECTED*\n"
+            f"• *Client Phone:* {_escape_markdown_v2(payload.get('client_phone_number'))}\n"
+            f"• *Trigger Reason:* {_escape_markdown_v2(payload.get('reason'))}\n"
+            f"• *Last Message:* `{_escape_markdown_v2(payload.get('last_message'))}`"
+        )
+    elif alert_type == "QUALIFIED_LEAD":
+        dossier = payload.get("lead_dossier", {})
+        text = (
+            f"🎯 *NEW QUALIFIED LEAD ENRICHED*\n"
+            f"• *Client Phone:* {_escape_markdown_v2(payload.get('client_phone_number'))}\n"
+            f"• *Target Location:* {_escape_markdown_v2(dossier.get('location'))}\n"
+            f"• *Verified Budget:* {_escape_markdown_v2(dossier.get('budget_aed'))} AED\n"
+            f"• *Purchase Timeline:* {_escape_markdown_v2(dossier.get('timeline'))}"
+        )
+    else:
+        text = _escape_markdown_v2(json.dumps(payload))
+
+    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
+    body = {
+        "chat_id": settings.TELEGRAM_ADMIN_CHAT_ID,
+        "text": text,
+        "parse_mode": "MarkdownV2",
+    }
+
     try:
         with httpx.Client(timeout=settings.NOTIFICATION_TIMEOUT_SECONDS) as client:
-            client.post(settings.NOTIFICATION_WEBHOOK_URL, json=payload)
+            resp = client.post(url, json=body)
+            if resp.status_code != 200:
+                print(f"[notification] Telegram API error {resp.status_code}: {resp.text}")
     except httpx.HTTPError as exc:
-        print(f"[notification] webhook delivery failed: {exc}")
+        print(f"[notification] Telegram delivery failed: {exc}")
 
 
 def send_escalation_alert(phone_number: str, reason: str, last_message: str) -> None:
@@ -478,6 +518,17 @@ def send_qualified_lead_alert(phone_number: str, lead: dict) -> None:
 # ---------------------------------------------------------------------------
 # Graph Assembly
 # ---------------------------------------------------------------------------
+def qualified_lead_reply_node(state: ConversationState) -> ConversationState:
+    """
+    Overwrites the customer-facing reply once a lead is Qualified, so the
+    customer gets the 'please allow 3-4 hours' message instead of whatever
+    text happened to come out of the last tool-calling turn.
+    """
+    if state.get("lead_status") == "Qualified":
+        return {"assistant_reply": settings.QUALIFIED_LEAD_CUSTOMER_REPLY}
+    return {"assistant_reply": state.get("assistant_reply", "")}
+
+
 def build_graph():
     graph = StateGraph(ConversationState)
 
@@ -486,6 +537,7 @@ def build_graph():
     graph.add_node("human_escalation", human_escalation_node)
     graph.add_node("agent_generate", agent_generate_node)
     graph.add_node("lead_qualification_check", lead_qualification_check_node)
+    graph.add_node("qualified_lead_reply", qualified_lead_reply_node)
 
     graph.set_entry_point("sanitize_input")
     graph.add_edge("sanitize_input", "sentiment_guardrail")
@@ -496,7 +548,8 @@ def build_graph():
     )
     graph.add_edge("human_escalation", END)
     graph.add_edge("agent_generate", "lead_qualification_check")
-    graph.add_edge("lead_qualification_check", END)
+    graph.add_edge("lead_qualification_check", "qualified_lead_reply")
+    graph.add_edge("qualified_lead_reply", END)
 
     return graph.compile()
 
@@ -528,3 +581,15 @@ def run_turn(phone_number: str, incoming_text: str) -> str:
     # never sets it) — pop(..., None) makes this a safe no-op either way.
     _CURRENT_PHONE.pop("session_id", None)
     return reply
+
+def send_telegram_reply(chat_id: str, text: str) -> None:
+    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
+    body = {"chat_id": chat_id, "text": text}
+    try:
+        with httpx.Client(timeout=settings.TELEGRAM_REPLY_TIMEOUT_SECONDS) as client:
+            resp = client.post(url, json=body)
+            print(f"[telegram_reply] status={resp.status_code} body={resp.text[:300]}")
+            if resp.status_code != 200:
+                print(f"[telegram_reply] delivery failed {resp.status_code}: {resp.text}")
+    except httpx.HTTPError as exc:
+        print(f"[telegram_reply] network error: {exc}")

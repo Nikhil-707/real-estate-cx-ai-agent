@@ -9,6 +9,7 @@ load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "cx-ai-agent-realestate-leadqualifier")
+PINECONE_NAMESPACE = os.getenv("PINECONE_NAMESPACE", "__default__")
 
 # 1. Initialize API Clients
 print("Connecting to secure cloud infrastructure panels...")
@@ -94,5 +95,5 @@ for prop in MOCK_PROPERTIES:
     })
 
 # Commit batch to the serverless cluster
-index.upsert(vectors=upsert_batch)
+index.upsert(vectors=upsert_batch, namespace=PINECONE_NAMESPACE)
 print("✅ Ingestion complete! The real estate vector registry is live.")

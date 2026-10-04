@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from config import settings
 from database import init_sqlite, get_lead
-from agent import run_turn
+from agent import run_turn, send_telegram_reply
 
 # ---------------------------------------------------------------------------
 # Logging — deliberately configured to NEVER log raw message bodies (PII).
@@ -64,6 +64,10 @@ class OutgoingReply(BaseModel):
     reply: str
     lead_status: str | None = None
 
+class TelegramUpdate(BaseModel):
+    # Telegram's actual update schema is much larger; we only need these paths.
+    update_id: int
+    message: dict | None = None
 
 # ---------------------------------------------------------------------------
 # Webhook verification (Meta-style GET challenge, kept for provider parity)
@@ -80,6 +84,34 @@ async def verify_webhook(request: Request):
 
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Webhook verification failed.")
 
+@app.post("/telegram-webhook/{secret}")
+async def telegram_webhook(secret: str, request: Request):
+    if secret != settings.TELEGRAM_WEBHOOK_SECRET:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid webhook secret.")
+
+    body = await request.json()
+    message = body.get("message")
+    if not message or "text" not in message:
+        # Non-text updates (stickers, edits, etc.) — acknowledge and ignore.
+        return JSONResponse({"ok": True})
+
+    chat_id = str(message["chat"]["id"])
+    text = message["text"]
+
+    logger.info("Inbound Telegram message received for a client (content redacted from logs).")
+
+    try:
+        reply_text = run_turn(phone_number=chat_id, incoming_text=text)
+    except Exception:
+        import traceback
+        print("FATAL_ERROR_START")
+        traceback.print_exc()
+        print("FATAL_ERROR_END")
+        logger.exception("run_turn failed")
+        reply_text = "Apologies, something went wrong on our end. Our team has been notified."
+
+    send_telegram_reply(chat_id=chat_id, text=reply_text)
+    return JSONResponse({"ok": True})
 
 # ---------------------------------------------------------------------------
 # Primary inbound message webhook

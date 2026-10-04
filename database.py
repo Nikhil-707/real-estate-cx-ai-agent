@@ -22,6 +22,7 @@ from typing import Iterator
 
 from google import genai
 from pinecone import Pinecone
+from google.genai import types as genai_types
 
 from config import settings
 
@@ -115,12 +116,13 @@ pc = Pinecone(api_key=settings.PINECONE_API_KEY)
 
 def query_properties(query_text: str, n_results: int = 3) -> list[dict]:
     """Deterministic RAG lookup — queries the live Pinecone Serverless Index."""
-    index = pc.Index(settings.PINECONE_INDEX_NAME)
+    index = pc.Index(host=settings.PINECONE_INDEX_HOST)
 
     # 1. Generate the vector via the official Google GenAI Client
     response = _embedding_client.models.embed_content(
         model=settings.GEMINI_EMBEDDING_MODEL,
         contents=query_text,
+        config=genai_types.EmbedContentConfig(output_dimensionality=768),
     )
     
     # 2. Resilient list vs object value extraction matching your SDK environment
@@ -137,16 +139,16 @@ def query_properties(query_text: str, n_results: int = 3) -> list[dict]:
         vector=query_vector, 
         top_k=n_results, 
         include_metadata=True,
-        namespace="_default_"  # Matches the exact metadata partition name from your dashboard screenshot
+        namespace=settings.PINECONE_NAMESPACE,
     )
 
     # 4. Map the matches cleanly to avoid breaking downstream LangGraph schemas
     hits = []
-    for match in query_res.get("matches", []):
+    for match in query_res.matches:
         hits.append({
-            "document": match.metadata.get("document", ""),
-            "metadata": match.metadata,
-            "distance": match.score,  # Maps similarity score over cleanly
+            "document": (match.metadata or {}).get("document", ""),
+            "metadata": dict(match.metadata or {}),
+            "distance": match.score,
         })
     return hits
 

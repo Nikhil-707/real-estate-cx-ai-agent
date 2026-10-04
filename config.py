@@ -46,15 +46,24 @@ class Settings:
     # The developer verification device that receives escalation + qualified-lead alerts.
     # NOTE: This is a POC-fixed destination (not a secret), set via env for flexibility.
     ESCALATION_PHONE_NUMBER: str = field(default_factory=lambda: _require_env("ESCALATION_PHONE_NUMBER", "+918484820346"))
-    NOTIFICATION_WEBHOOK_URL: str = field(default_factory=lambda: _require_env(
-        "NOTIFICATION_WEBHOOK_URL", "https://webhook.site/replace-with-your-endpoint"
-    ))
+    
     NOTIFICATION_TIMEOUT_SECONDS: float = field(default_factory=lambda: float(_require_env("NOTIFICATION_TIMEOUT_SECONDS", "5.0")))
 
     # --- Storage Paths ----------------------------------------------------
     BASE_DIR: Path = field(default_factory=lambda: Path(__file__).resolve().parent)
     SQLITE_DB_PATH: str = field(default_factory=lambda: _require_env("SQLITE_DB_PATH", ":memory:"))
 
+    TELEGRAM_BOT_TOKEN: str = field(default_factory=lambda: _require_env("TELEGRAM_BOT_TOKEN", required=True))
+    TELEGRAM_ADMIN_CHAT_ID: str = field(default_factory=lambda: _require_env("TELEGRAM_ADMIN_CHAT_ID", required=True))
+    TELEGRAM_WEBHOOK_SECRET: str = field(default_factory=lambda: _require_env("TELEGRAM_WEBHOOK_SECRET", "dev-telegram-secret"))
+    TELEGRAM_REPLY_TIMEOUT_SECONDS: float = field(default_factory=lambda: float(_require_env("TELEGRAM_REPLY_TIMEOUT_SECONDS", "15.0")))
+
+    QUALIFIED_LEAD_CUSTOMER_REPLY: str = (
+        "Wonderful — I have everything I need. One of our senior advisors will "
+        "personally reach out within the next 3-4 hours to confirm the final "
+        "details and next steps. Thank you for your patience."
+    )
+    
     # --- Vector Store (Pinecone Serverless) --------------------------------
     # Pinecone serverless index. PINECONE_API_KEY is mandatory — there is no
     # safe default for a credential, so this fails fast at startup if unset.
@@ -62,6 +71,8 @@ class Settings:
     PINECONE_INDEX_NAME: str = field(default_factory=lambda: _require_env(
         "PINECONE_INDEX_NAME", "cx-ai-agent-realestate-leadqualifier"
     ))
+    PINECONE_NAMESPACE: str = field(default_factory=lambda: _require_env("PINECONE_NAMESPACE", "__default__"))
+    PINECONE_INDEX_HOST: str = field(default_factory=lambda: _require_env("PINECONE_INDEX_HOST", required=True))
     GEMINI_EMBEDDING_MODEL: str = field(default_factory=lambda: _require_env("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001"))
 
     # --- Safety / Guardrail Thresholds -------------------------------------
