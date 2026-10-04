@@ -19,8 +19,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from config import settings
-from database import init_sqlite, get_lead
-from agent import run_turn, send_telegram_reply
+from database import init_sqlite, get_lead, set_verified_phone, set_sender_identity
+from agent import run_turn, send_telegram_reply, handle_contact_reply, pop_pending_keyboard
 
 # ---------------------------------------------------------------------------
 # Logging — deliberately configured to NEVER log raw message bodies (PII).
@@ -91,12 +91,44 @@ async def telegram_webhook(secret: str, request: Request):
 
     body = await request.json()
     message = body.get("message")
-    if not message or "text" not in message:
-        # Non-text updates (stickers, edits, etc.) — acknowledge and ignore.
+    if not message:
+        # No message payload at all (e.g. some other update type) — ignore.
         return JSONResponse({"ok": True})
 
     chat_id = str(message["chat"]["id"])
+
+    # Telegram's own identity fields (message.from) arrive with every update.
+    sender = message.get("from") or {}
+    set_sender_identity(
+        chat_id,
+        first_name=sender.get("first_name", ""),
+        last_name=sender.get("last_name", ""),
+        username=sender.get("username"),
+    )
+
+    # --- Native contact share (the "Share my contact" button) --------------
+    # Must be checked before the "text" guard: contact updates carry no text.
+    if message.get("contact"):
+        shared_phone = message["contact"].get("phone_number")
+        logger.info("Client shared a contact (value redacted from logs).")
+        outcome = handle_contact_reply(chat_id, shared_phone=shared_phone or "")
+        reply_text, remove_kb = outcome
+        send_telegram_reply(chat_id=chat_id, text=reply_text, remove_keyboard=remove_kb)
+        return JSONResponse({"ok": True})
+
+    if "text" not in message:
+        return JSONResponse({"ok": True})
+
     text = message["text"]
+
+    # --- Contact stage: a typed number / "skip" / country-code nudge --------
+    # Only active while the client has been asked for a number. Everything
+    # else (including all normal conversation) falls through to run_turn().
+    outcome = handle_contact_reply(chat_id, text=text)
+    if outcome is not None:
+        reply_text, remove_kb = outcome
+        send_telegram_reply(chat_id=chat_id, text=reply_text, remove_keyboard=remove_kb)
+        return JSONResponse({"ok": True})
 
     logger.info("Inbound Telegram message received for a client (content redacted from logs).")
 
@@ -110,7 +142,10 @@ async def telegram_webhook(secret: str, request: Request):
         logger.exception("run_turn failed")
         reply_text = "Apologies, something went wrong on our end. Our team has been notified."
 
-    send_telegram_reply(chat_id=chat_id, text=reply_text)
+    # If this turn qualified the lead, the reply is the "please share your
+    # number" message and it must carry the native share button.
+    send_telegram_reply(chat_id=chat_id, text=reply_text, reply_markup=pop_pending_keyboard(chat_id))
+
     return JSONResponse({"ok": True})
 
 # ---------------------------------------------------------------------------
@@ -120,6 +155,9 @@ async def telegram_webhook(secret: str, request: Request):
 async def receive_message(payload: IncomingMessage):
     # Never log payload.message directly — PII must stay inside ephemeral Graph State.
     logger.info("Inbound message received for a client (content redacted from logs).")
+
+    # On this channel the session key IS a real phone number; keep it as the contact.
+    set_verified_phone(payload.phone_number, payload.phone_number)
 
     try:
         reply_text = run_turn(phone_number=payload.phone_number, incoming_text=payload.message)
@@ -135,7 +173,7 @@ async def receive_message(payload: IncomingMessage):
 
 @app.get("/health")
 async def health_check():
-    return JSONResponse({"status": "ok", "service": "dubai-luxury-concierge"})
+    return JSONResponse({"status": "ok", "service": "Real Estate - CX AI Agent"})
 
 
 if __name__ == "__main__":

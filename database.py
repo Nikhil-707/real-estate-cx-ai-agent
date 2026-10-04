@@ -26,6 +26,7 @@ from google.genai import types as genai_types
 
 from config import settings
 import time
+import re
 
 # ---------------------------------------------------------------------------
 # SQLite — Thread-safe in-memory conversation store
@@ -177,3 +178,96 @@ def upsert_lead(phone_number: str, **fields) -> dict:
 
 def get_lead(phone_number: str) -> dict | None:
     return MOCK_CRM.get(phone_number)
+
+
+def mark_contact_requested(session_key: str) -> dict:
+    """Idempotency guard so we only ever send the contact-share prompt once per lead."""
+    return upsert_lead(phone_number=session_key, contact_requested=True)
+
+
+def has_requested_contact(session_key: str) -> bool:
+    lead = get_lead(session_key)
+    return bool(lead and lead.get("contact_requested"))
+
+
+# ---------------------------------------------------------------------------
+# Phone-number parsing / validation (E.164, country code mandatory)
+# ---------------------------------------------------------------------------
+_E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")  # + then 8-15 digits, first digit never 0
+
+# Arabic-Indic and Eastern Arabic-Indic digits -> ASCII, so "+٩٧١٥٠..." works too.
+_DIGIT_TABLE = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+
+# A number that STARTS with "+" or "00" (country-code marker), optionally
+# followed by spaces/dashes/brackets between groups, e.g.
+#   +971501234567 | +971 50 123 4567 | + 971 50-123-4567 | 00971 50 123 4567
+_PHONE_CANDIDATE_RE = re.compile(r"(?:\+|00)[\s\-().]*\d[\d\s\-().]{6,22}")
+
+
+def normalize_phone(raw: str, assume_plus: bool = False) -> str | None:
+    """
+    Returns a clean E.164 string ('+971501234567') or None if `raw` is not a
+    valid international number. Spaces, dashes and brackets are ignored, a
+    leading '00' is treated as '+'. `assume_plus=True` is only for payloads
+    that are guaranteed to already carry a country code (Telegram's native
+    contact share sends '971501234567' without the '+').
+    """
+    if not raw:
+        return None
+    s = str(raw).translate(_DIGIT_TABLE)
+    s = re.sub(r"[\s\-().]", "", s)
+    if s.startswith("00"):
+        s = "+" + s[2:]
+    elif assume_plus and not s.startswith("+"):
+        s = "+" + s
+    return s if _E164_RE.match(s) else None
+
+
+def extract_phone_from_text(text: str) -> str | None:
+    """Finds a valid international number inside free text, or None."""
+    m = _PHONE_CANDIDATE_RE.search((text or "").translate(_DIGIT_TABLE))
+    return normalize_phone(m.group(0)) if m else None
+
+
+def looks_like_number_without_country_code(text: str) -> bool:
+    """True for things like '8484820346' or '084 848 20346' — digits, no +/00 prefix."""
+    t = (text or "").translate(_DIGIT_TABLE)
+    if extract_phone_from_text(t):
+        return False
+    return bool(re.search(r"\d[\d\s\-().]{5,}\d", t)) and len(re.sub(r"\D", "", t)) >= 7
+
+
+# ---------------------------------------------------------------------------
+# CRM helpers: identity + contact state
+# ---------------------------------------------------------------------------
+def set_sender_identity(session_key: str, first_name: str, last_name: str, username: str | None) -> dict:
+    """
+    Captures Telegram's own identity fields (message.from) — display name and
+    @handle come for free in every update. This is NOT a phone number.
+    """
+    display_name = f"{first_name or ''} {last_name or ''}".strip()
+    return upsert_lead(
+        phone_number=session_key,
+        channel="telegram",
+        telegram_display_name=display_name or None,
+        telegram_username=username,
+    )
+
+
+def set_verified_phone(session_key: str, phone: str) -> dict | None:
+    """
+    Stores a real phone number the client explicitly gave us. Returns the CRM
+    record, or None (and stores NOTHING) if the number is not valid E.164.
+    """
+    normalized = normalize_phone(phone, assume_plus=True)
+    if not normalized:
+        return None
+    return upsert_lead(phone_number=session_key, verified_phone=normalized, contact_status="shared")
+
+
+def set_contact_declined(session_key: str) -> dict:
+    return upsert_lead(phone_number=session_key, contact_status="refused")
+
+
+def set_contact_not_provided(session_key: str) -> dict:
+    return upsert_lead(phone_number=session_key, contact_status="not_provided")
