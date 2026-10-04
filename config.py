@@ -93,10 +93,11 @@ class Settings:
         "useless bot",
     )
 
-    FALLBACK_NO_DATA_PHRASE: str = (
-        "Let me pull the exact updated developer sheet for you right now—"
-        "I'm looping in our portfolio manager to drop that asset brochure "
-        "directly into this chat."
+    FALLBACK_NO_DATA_PHRASE: str = field(
+        default_factory=lambda: _require_env(
+            "FALLBACK_NO_DATA_PHRASE",
+            "I currently don't have an active listing matching those exact criteria in our portfolio, but I can check with our off-market sourcing team for you."
+        )
     )
 
 

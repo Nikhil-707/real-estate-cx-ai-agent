@@ -25,6 +25,7 @@ from pinecone import Pinecone
 from google.genai import types as genai_types
 
 from config import settings
+import time
 
 # ---------------------------------------------------------------------------
 # SQLite — Thread-safe in-memory conversation store
@@ -119,11 +120,19 @@ def query_properties(query_text: str, n_results: int = 3) -> list[dict]:
     index = pc.Index(host=settings.PINECONE_INDEX_HOST)
 
     # 1. Generate the vector via the official Google GenAI Client
-    response = _embedding_client.models.embed_content(
-        model=settings.GEMINI_EMBEDDING_MODEL,
-        contents=query_text,
-        config=genai_types.EmbedContentConfig(output_dimensionality=768),
-    )
+    # Retry loop for transient API cold-starts
+    for attempt in range(3):
+        try:
+            response = _embedding_client.models.embed_content(
+                model=settings.GEMINI_EMBEDDING_MODEL,
+                contents=query_text,
+                config=genai_types.EmbedContentConfig(output_dimensionality=768),
+            )
+            break
+        except Exception as e:
+            if attempt == 2:
+                raise e
+            time.sleep(0.5 * (2 ** attempt))
     
     # 2. Resilient list vs object value extraction matching your SDK environment
     embeddings_attr = response.embeddings

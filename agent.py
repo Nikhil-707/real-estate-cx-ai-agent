@@ -390,12 +390,6 @@ def agent_generate_node(state: ConversationState) -> ConversationState:
             final_text = "".join(part.text or "" for part in candidate.content.parts)
             return {"assistant_reply": final_text.strip(), "lead_fields": lead_update}
 
-        # --- FIX: Set thought_signature on Part (not FunctionCall) for Gemini 3 tool turns ---
-        for part in candidate.content.parts:
-            if getattr(part, "function_call", None):
-                if not getattr(part, "thought_signature", None):
-                    part.thought_signature = "skip_thought_signature_validator"
-
         # Echo the model's function-call turn back into the conversation, then
         # execute each tool and append the function_response turn.
         contents.append(candidate.content)
